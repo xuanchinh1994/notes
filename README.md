@@ -1,107 +1,102 @@
-# notes
-
-## Token
-
-
-Here is the English translation of your Technical Proposal. I kept the tone professional, objective, and technical so it is perfectly suited for presentation to your development team, Project Manager, or System Architect.
-TECHNICAL PROPOSAL: OPTIMIZING THE USB RESUME PROCESS ON LINUX KERNEL 6.12
+.
+Here is the English translation of your Technical Proposal. I have maintained the professional, technical, and structured tone of the original text so that it is ready to be presented to your Board of Directors (BOD), Project Manager, or System Architecture Team.
+Below is the detailed Technical Proposal for Option 3: Developing an Independent Kernel Module (Out-of-tree LKM).
+This proposal is designed for you to present to the Board of Directors (BOD), Project Manager (PM), or System Architecture Team when the project has strict requirements for ultra-low latency and priority control for specific USB devices, which the native solution in Option 1 cannot fully fulfill.
+TECHNICAL PROPOSAL: DEVELOPING AN INDEPENDENT KERNEL MODULE FOR USB RESUME MANAGEMENT ON LINUX 6.12
 1. Executive Summary
-When upgrading the system to Linux Kernel 6.12, maintaining custom patches that deeply intervene in the USB Core (drivers/usb/core/) and Power Management Core (drivers/base/power/main.c) to achieve a "parallel resume/snapshot" is no longer feasible. It causes source code conflicts, increases technical debt, and raises the risk of Kernel Panics.
-This proposal presents an alternative solution: Leveraging the Kernel's native Asynchronous Suspend/Resume mechanism via Udev Rule configurations in User-space. This solution ensures that the wake-up time of USB devices is optimized in parallel without requiring any modifications to the USB core/host source code.
+During the system migration to Linux Kernel 6.12, maintaining direct patches to the kernel source code (especially drivers/usb/core/hub.c and drivers/base/power/main.c) to achieve parallel resume or instant resume is no longer feasible due to internal architectural changes in the Kernel and a high risk of conflicts.
+This proposal presents Option 3: Building a fully independent Loadable Kernel Module (LKM) located outside the kernel tree (Out-of-tree). This module will act as a hidden "conductor," utilizing standard APIs of the Power Management (PM) system to intercept Suspend/Resume events and proactively wake up high-priority USB devices without modifying any core/host code lines.
 2. Background & Problem
- * Legacy Solution: Using global variables and modifying the logic within generic.c or hub.c to force USB devices to bypass sequential execution and resume simultaneously. Occasionally, a priority thread (instant_ctrl) was used to wake up essential devices first.
- * Issues on Kernel 6.12:
-   * The Kernel's Power Management (PM) architecture has undergone significant changes. Maintaining out-of-tree patches incurs high maintenance costs.
-   * Direct conflicts with security and performance updates from Upstream.
- * Objective: Achieve parallel resume speeds (approaching the legacy solution) while strictly adhering to the "Zero core-modifications" philosophy.
+ * Legacy Solution (Legacy Patch): Using global variables like instant_ctrl and prevent_disconnection_resume, and directly modifying the generic_resume function to force devices to wake up instantly. Direct intervention in the Kernel's power management flow (DPM - Device Power Management) creates hard-coupling and massive technical debt.
+ * Limitations of Option 1 (Native Async PM): Although clean and safe, Option 1 only helps devices wake up in parallel; the Kernel itself decides which thread runs first. We lose the ability to specify "Device A must wake up first."
+ * Objective: We need a mechanism that allows Instant Resume for critical devices (such as display clusters, high-priority communication modules) at a speed comparable to the legacy patch, while ensuring the architectural design meets the "Plug-and-Play LKM" standard on Kernel 6.12.
 3. Proposed Solution
-Utilize the Native Asynchronous PM built into the Linux kernel. Instead of hardcoding logic in the Kernel, we will shift configuration decisions to User-space via the udev device management system.
-Operating Principle:
- * When a USB device is recognized, the Linux Kernel assigns it a power management attribute in sysfs (specifically /sys/bus/usb/devices/.../power/async).
- * By default, this feature might not be enabled for certain devices or buses to ensure backward compatibility.
- * We will write Udev Rules to automatically "listen" for hardware events. As soon as the system boots or a device is plugged in, Udev will automatically write the enabled flag to the power/async attribute.
- * When the system receives a Wake-up command from the Suspend state, the Kernel PM Core will read this flag and automatically allocate Worker Threads to invoke the resume functions of the USB devices simultaneously (in parallel), rather than waiting for them to execute one by one.
+Design a .ko Kernel Module (e.g., usb_priority_resume.ko). This module will utilize Linux's PM Notifier and Bus Notifier mechanisms.
+Module's Operational Architecture:
+ * Event Hooking: The module registers a callback with the system via register_pm_notifier(). When the Kernel issues a prepare-to-sleep command (PM_SUSPEND_PREPARE), this callback is triggered.
+ * Device Scanning: The module iterates through the USB bus (using bus_for_each_dev). It compares the Vendor ID (VID) and Product ID (PID) or Port Number against a predefined list of "VIP Devices."
+ * Intervention: * For VIP devices: The module will inject special flags, such as automatically calling device_enable_async_suspend() from Kernel-space, or attaching the USB_QUIRK_RESET_RESUME flag to the udev structure to force a hot reset upon wake-up (helping to bypass slow sequential initialization steps).
+   * Priority Thread Configuration: Right at the PM_POST_SUSPEND phase (when the CPU has just woken up, but peripherals are still sleeping), the Module triggers an ultra-high priority Workqueue (highpri_wq) to directly invoke the resume command for these VIP devices before the Kernel PM Core has a chance to traverse the standard list.
 4. Implementation Plan
-Phase 4.1: Target Hardware Identification
-System engineers will compile a list of USB devices that require prioritized resume time optimization on the board (e.g., Wi-Fi/BT Module, USB Touchscreen, 4G/5G Modem). Extract the Vendor ID (VID) and Product ID (PID) using the lsusb command.
-Phase 4.2: Udev Rule Integration into Rootfs
-Create a new rule file, for example, 99-usb-async-resume.rules, and place it in the /etc/udev/rules.d/ directory within the firmware's root file system (Rootfs).
-Reference Content (Customizable per project):
-# [PROJECT ABC] - Auto-enable Asynchronous Resume for critical peripherals
+Phase 4.1: Developing the LKM Skeleton
+ * Write a basic C file (usb_priority_resume.c) with module_init and module_exit functions.
+ * Register bus_register_notifier(&usb_bus_type, &usb_notifier) to detect as soon as a VIP device is plugged in.
+Phase 4.2: Implementing Instant Resume Logic
+ * Initialize a Linked List to manage currently connected VIP devices.
+ * Write a callback function for the PM Notifier:
+<!-- end list -->
+static int pm_notify_callback(struct notifier_block *nb, unsigned long action, void *data) {
+    switch (action) {
+        case PM_SUSPEND_PREPARE:
+            // Mark state, prepare for the sleep process
+            break;
+        case PM_POST_SUSPEND:
+            // Call high-priority Workqueue to instantly force resume on VIP devices
+            wake_up_vip_devices_instantly();
+            break;
+    }
+    return NOTIFY_OK;
+}
 
-# 1. Enable Async PM for Wifi/BT Module (e.g., Realtek - VID:0bda PID:c820)
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="c820", ATTR{power/async}="enabled"
-
-# 2. Enable Async PM for Touchscreen Module (e.g., Goodix - VID:27c6 PID:0118)
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="27c6", ATTR{idProduct}=="0118", ATTR{power/async}="enabled"
-
-# 3. (Optional) Enable for all USB devices if hardware permits
-# ACTION=="add", SUBSYSTEM=="usb", ATTR{power/async}="enabled"
-
-Phase 4.3: Integration into Yocto/Buildroot (If applicable)
-If the project uses the Yocto Project or Buildroot to build the OS:
- * Create a custom recipe (e.g., usb-async-rules.bb) to copy this .rules file into /etc/udev/rules.d/ during the image build process.
-5. Pros & Risks
+Phase 4.3: Dynamic Configuration via Sysfs
+ * Create a Sysfs interface (e.g., /sys/kernel/usb_priority_resume/vip_list) allowing dynamic configuration (from User-space) of the VIDs/PIDs that need prioritization without needing to re-compile the module.
+5. Pros & Risks Assessment
 Pros:
- * Zero Technical Debt: A complete transition to standard Linux mechanisms (Upstream-friendly). There is no need to maintain kernel patches when upgrading to newer Kernel versions (6.15, 6.20...).
- * High Stability: Entirely avoids the risk of Deadlocks or Kernel Panics caused by incorrect PM thread interventions.
- * Stateful: Applications holding open device file descriptors (e.g., /dev/ttyUSB0) will not lose their connections (no I/O errors) during sleep/wake cycles.
- * Easy Configuration: Adding or removing devices for optimization only requires editing a text file in user-space; no kernel recompilation is needed.
+ * Ultra-low Latency: Restores Instant Resume capabilities similar to the legacy solution. VIP devices can wake up 30-50% faster than standard sequential Async methods.
+ * Clean Architecture: Leaves the kernel core source code (hub.c, main.c) untouched. The source code is highly maintainable and makes it easy to upstream the system kernel to 6.12 or newer without encountering git merge conflicts.
+ * Stateful: Does not use unbind/bind commands. User-space applications will not experience connection drops or I/O errors.
 Risks & Mitigations:
- * Risk: Cannot assign a "Strict Priority" to a specific device like the legacy solution (instant_resume). Because the kernel self-allocates threads, devices A and B will wake up in parallel, but there is no guarantee that device A will finish before device B.
- * Mitigation: The application layer in user-space must be redesigned to check device states more flexibly, rather than relying on a hardcoded hardware initialization sequence.
+ * Risk: Deep intervention using a high-priority Workqueue can cause Race Conditions with the Kernel's native PM system, potentially leading to a Kernel Panic if memory or locks (Mutex/Spinlock) are not strictly managed.
+ * Mitigation: The development team (Kernel Devs) must strictly adhere to Linux Locking rules; utilize the Lockdep tool in the Kernel configuration to detect deadlocks during development; and conduct thorough testing on the QEMU platform before flashing to the physical board.
 6. Test Plan
-To validate the effectiveness of the solution, the QA/Dev team will execute the following tests:
- * Configuration State Check:
-   * After booting, read the /sys/bus/usb/devices/<bus-id>/power/async file to verify that the system returns the value enabled.
+ * Basic Functional Testing:
+   * Load the module (insmod usb_priority_resume.ko).
+   * Write the VID/PID of the touchscreen to the sysfs configuration file.
+   * Run the system sleep command (echo mem > /sys/power/state). Connect the monitor and observe the latency when the system wakes up.
  * Performance Profiling:
-   * Use the analyze_suspend.py tool (located in the tools/power/pm-graph/ directory of the kernel tree) to plot the Suspend/Resume timeline.
-   * Success Criterion: The graph displays the usb_resume functions of the devices overlapping on the timeline, instead of running sequentially.
- * Functional Test:
-   * Perform continuous Suspend/Resume cycles 1,000 times (Stress test). Ensure no device drops or Kernel Oops occur.
+   * Use analyze_suspend.py.
+   * Success Criterion: The dmesg graph shows the VIP device's resume function completing before other USB devices can even begin their recovery process.
+ * Stability Test:
+   * Enable the CONFIG_PROVE_LOCKING option in the kernel.
+   * Run a continuous Suspend/Resume script via UART/SSH port for 72 hours. Objective: 0 Kernel Oops, 0 Memory Leaks.
 7. Conclusion
-Transitioning from a "Custom Kernel Patch" to "Native Asynchronous PM via Udev" is the most sustainable, safe, and robust development path for Kernel 6.12. This solution perfectly satisfies the requirement of zero interference with the USB core/host source code, while still delivering outstanding parallel resume performance. We recommend approval to proceed with a Proof of Concept (PoC) directly on the target board.
-Would you like me to help you draft an introductory email to go along with this proposal when you send it to your team?
+Building an independent LKM is the perfect combination of the legacy patch's Performance and the Safety and Maintainability of the Linux 6.12 platform. This option requires a higher level of Kernel-space C programming effort than Option 1 (Udev), but it is the only viable solution if the project strictly mandates an "Instant Resume" feature for critical peripherals. We respectfully request budget/resource approval to proceed with developing a Proof of Concept (PoC) for this module.
+Would you like me to format this into a markdown file so you can easily copy and paste it into GitHub, Confluence, or your internal wiki?
 
 
 graph TD
     classDef sysfs fill:#f9f,stroke:#333,stroke-width:2px;
     classDef kernel fill:#bbf,stroke:#333,stroke-width:2px;
-    classDef user fill:#dfd,stroke:#333,stroke-width:2px;
-    classDef parallel fill:#ff9,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef lkm fill:#dfd,stroke:#333,stroke-width:2px;
+    classDef instant fill:#ff9,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
 
-    %% GIAI ĐOẠN 1: CẮM THIẾT BỊ / KHỞI ĐỘNG
-    subgraph Phase1 ["Giai đoạn 1: Khởi tạo và Gán cờ Async (Hot-plug/Boot)"]
-        A1(Cắm thiết bị USB vào bo mạch) --> A2[Kernel USB Core nhận diện thiết bị mới]:::kernel
-        A2 --> A3[Kernel tạo các file node trong Sysfs\nVí dụ: /sys/bus/usb/devices/1-1/]:::kernel
-        A3 --> A4[Hệ thống phát ra sự kiện uevent 'add']:::kernel
-        A4 --> A5[Udev Daemon bắt được sự kiện]:::user
-        A5 --> A6{Kiểm tra Udev Rules\nCó khớp VID/PID không?}:::user
-        A6 -- Có --> A7[Udev tự động ghi chữ 'enabled' vào\n/sys/bus/usb/devices/1-1/power/async]:::sysfs
-        A6 -- Không --> A8[Bỏ qua, dùng cấu hình mặc định]
+    %% GIAI ĐOẠN 1: KHỞI TẠO VÀ CẤU HÌNH
+    subgraph Phase1 ["Giai đoạn 1: Khởi tạo Module và Cấu hình VIP"]
+        A1(Boot hệ thống / Tải LKM) --> A2[LKM: Đăng ký PM Notifier và Bus Notifier]:::lkm
+        A2 --> A3[LKM: Sẵn sàng lắng nghe sự kiện hệ thống]:::lkm
+        A4(User-space: Ghi danh sách VID/PID ưu tiên) --> A5[Sysfs: Cập nhật danh sách VIP Devices]:::sysfs
+        A5 --> A6[LKM: Lưu danh sách VIP vào bộ nhớ nội bộ]:::lkm
     end
 
     %% GIAI ĐOẠN 2: HỆ THỐNG SUSPEND
-    subgraph Phase2 ["Giai đoạn 2: Đi vào chế độ ngủ (System Suspend)"]
-        B1(Nhận lệnh Suspend hệ thống) --> B2[Kernel PM Core duyệt qua các thiết bị]:::kernel
-        B2 --> B3{Kiểm tra cờ power/async\nđã được bật chưa?}:::kernel
-        B3 -- Đã bật --> B4[PM Core đẩy tác vụ Suspend\nvào hàng đợi Async Worker Threads]:::kernel
-        B3 -- Chưa bật --> B5[Thực hiện Suspend tuần tự\nChờ xong thiết bị này mới đến thiết bị khác]:::kernel
-        B4 --> B6[Các thiết bị USB đi vào trạng thái\nSuspend CÙNG LÚC song song]:::parallel
-        B5 --> B7(Hệ thống hoàn tất Suspend)
+    subgraph Phase2 ["Giai đoạn 2: Hệ thống đi vào chế độ ngủ (Suspend)"]
+        B1(Hệ thống nhận lệnh Suspend) --> B2[Kernel Core phát sự kiện PM_SUSPEND_PREPARE]:::kernel
+        B2 --> B3[LKM: PM Callback bắt được sự kiện]:::lkm
+        B3 --> B4{Duyệt USB Bus: Có thiết bị VIP không?}:::lkm
+        B4 -- Có --> B5[LKM: Đánh dấu thiết bị VIP và chuẩn bị cờ Instant Resume]:::lkm
+        B4 -- Không --> B6[LKM: Bỏ qua, không làm gì cả]:::lkm
+        B5 --> B7(Hệ thống hoàn tất Suspend và ngủ)
         B6 --> B7
     end
 
     %% GIAI ĐOẠN 3: HỆ THỐNG RESUME
-    subgraph Phase3 ["Giai đoạn 3: Đánh thức hệ thống (System Resume)"]
-        C1(Nhận tín hiệu Wake-up) --> C2[Kernel PM Core khởi động lại]:::kernel
-        C2 --> C3[Duyệt danh sách thiết bị cần Resume]:::kernel
-        C3 --> C4{Kiểm tra cờ power/async}:::kernel
-        C4 -- Đã bật --> C5[Giao nhiệm vụ Resume cho\nnhiều Async Worker Threads]:::kernel
-        C4 -- Chưa bật --> C6[Thực hiện Resume tuần tự\nChậm chạp]:::kernel
-        C5 --> C7[Gọi hàm usb_resume cho các\nthiết bị CÙNG LÚC song song]:::parallel
-        C7 --> C8[Tối ưu hóa thời gian chờ, các thiết bị\nkhôi phục trạng thái nhanh nhất có thể]:::parallel
-        C6 --> C9(Hệ thống hoàn tất Resume)
-        C8 --> C9
-        C9 --> C10(User-space app tiếp tục hoạt động\nKhông bị mất kết nối):::user
+    subgraph Phase3 ["Giai đoạn 3: Hệ thống thức dậy (Instant Resume)"]
+        C1(Nhận tín hiệu Wake-up) --> C2[Kernel Core phát sự kiện PM_POST_SUSPEND (Rất sớm)]:::kernel
+        C2 --> C3[LKM: PM Callback bắt được sự kiện sớm]:::lkm
+        C3 --> C4[LKM: Kích hoạt High-Priority Workqueue]:::lkm
+        C4 --> C5[LKM: Gọi ép hàm resume trực tiếp cho các thiết bị VIP]:::lkm
+        C5 --> C6[Thiết bị VIP thức dậy TỨC THÌ (Instant Resume)\nTrước cả khi Kernel kịp xử lý]:::instant
+        C6 --> C7[Kernel PM Core bắt đầu duyệt và Resume các thiết bị USB thông thường]:::kernel
+        C7 --> C8(Hệ thống hoàn tất Resume)
+        C8 --> C9(Ứng dụng trên User-space kết nối lại ngay lập tức với VIP Device)
     end
