@@ -71,7 +71,7 @@ graph TD
     classDef parallel fill:#ff9,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
 
     %% GIAI ĐOẠN 1: CẮM THIẾT BỊ / KHỞI ĐỘNG
-    subgraph Giai đoạn 1: Khởi tạo & Gán cờ Async (Hot-plug/Boot)
+    subgraph Phase1 ["Giai đoạn 1: Khởi tạo và Gán cờ Async (Hot-plug/Boot)"]
         A1(Cắm thiết bị USB vào bo mạch) --> A2[Kernel USB Core nhận diện thiết bị mới]:::kernel
         A2 --> A3[Kernel tạo các file node trong Sysfs\nVí dụ: /sys/bus/usb/devices/1-1/]:::kernel
         A3 --> A4[Hệ thống phát ra sự kiện uevent 'add']:::kernel
@@ -82,7 +82,7 @@ graph TD
     end
 
     %% GIAI ĐOẠN 2: HỆ THỐNG SUSPEND
-    subgraph Giai đoạn 2: Đi vào chế độ ngủ (System Suspend)
+    subgraph Phase2 ["Giai đoạn 2: Đi vào chế độ ngủ (System Suspend)"]
         B1(Nhận lệnh Suspend hệ thống) --> B2[Kernel PM Core duyệt qua các thiết bị]:::kernel
         B2 --> B3{Kiểm tra cờ power/async\nđã được bật chưa?}:::kernel
         B3 -- Đã bật --> B4[PM Core đẩy tác vụ Suspend\nvào hàng đợi Async Worker Threads]:::kernel
@@ -93,7 +93,7 @@ graph TD
     end
 
     %% GIAI ĐOẠN 3: HỆ THỐNG RESUME
-    subgraph Giai đoạn 3: Đánh thức hệ thống (System Resume)
+    subgraph Phase3 ["Giai đoạn 3: Đánh thức hệ thống (System Resume)"]
         C1(Nhận tín hiệu Wake-up) --> C2[Kernel PM Core khởi động lại]:::kernel
         C2 --> C3[Duyệt danh sách thiết bị cần Resume]:::kernel
         C3 --> C4{Kiểm tra cờ power/async}:::kernel
