@@ -62,3 +62,46 @@ To validate the effectiveness of the solution, the QA/Dev team will execute the 
 7. Conclusion
 Transitioning from a "Custom Kernel Patch" to "Native Asynchronous PM via Udev" is the most sustainable, safe, and robust development path for Kernel 6.12. This solution perfectly satisfies the requirement of zero interference with the USB core/host source code, while still delivering outstanding parallel resume performance. We recommend approval to proceed with a Proof of Concept (PoC) directly on the target board.
 Would you like me to help you draft an introductory email to go along with this proposal when you send it to your team?
+
+
+graph TD
+    classDef sysfs fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef kernel fill:#bbf,stroke:#333,stroke-width:2px;
+    classDef user fill:#dfd,stroke:#333,stroke-width:2px;
+    classDef parallel fill:#ff9,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
+
+    %% GIAI ĐOẠN 1: CẮM THIẾT BỊ / KHỞI ĐỘNG
+    subgraph Giai đoạn 1: Khởi tạo & Gán cờ Async (Hot-plug/Boot)
+        A1(Cắm thiết bị USB vào bo mạch) --> A2[Kernel USB Core nhận diện thiết bị mới]:::kernel
+        A2 --> A3[Kernel tạo các file node trong Sysfs\nVí dụ: /sys/bus/usb/devices/1-1/]:::kernel
+        A3 --> A4[Hệ thống phát ra sự kiện uevent 'add']:::kernel
+        A4 --> A5[Udev Daemon bắt được sự kiện]:::user
+        A5 --> A6{Kiểm tra Udev Rules\nCó khớp VID/PID không?}:::user
+        A6 -- Có --> A7[Udev tự động ghi chữ 'enabled' vào\n/sys/bus/usb/devices/1-1/power/async]:::sysfs
+        A6 -- Không --> A8[Bỏ qua, dùng cấu hình mặc định]
+    end
+
+    %% GIAI ĐOẠN 2: HỆ THỐNG SUSPEND
+    subgraph Giai đoạn 2: Đi vào chế độ ngủ (System Suspend)
+        B1(Nhận lệnh Suspend hệ thống) --> B2[Kernel PM Core duyệt qua các thiết bị]:::kernel
+        B2 --> B3{Kiểm tra cờ power/async\nđã được bật chưa?}:::kernel
+        B3 -- Đã bật --> B4[PM Core đẩy tác vụ Suspend\nvào hàng đợi Async Worker Threads]:::kernel
+        B3 -- Chưa bật --> B5[Thực hiện Suspend tuần tự\nChờ xong thiết bị này mới đến thiết bị khác]:::kernel
+        B4 --> B6[Các thiết bị USB đi vào trạng thái\nSuspend CÙNG LÚC song song]:::parallel
+        B5 --> B7(Hệ thống hoàn tất Suspend)
+        B6 --> B7
+    end
+
+    %% GIAI ĐOẠN 3: HỆ THỐNG RESUME
+    subgraph Giai đoạn 3: Đánh thức hệ thống (System Resume)
+        C1(Nhận tín hiệu Wake-up) --> C2[Kernel PM Core khởi động lại]:::kernel
+        C2 --> C3[Duyệt danh sách thiết bị cần Resume]:::kernel
+        C3 --> C4{Kiểm tra cờ power/async}:::kernel
+        C4 -- Đã bật --> C5[Giao nhiệm vụ Resume cho\nnhiều Async Worker Threads]:::kernel
+        C4 -- Chưa bật --> C6[Thực hiện Resume tuần tự\nChậm chạp]:::kernel
+        C5 --> C7[Gọi hàm usb_resume cho các\nthiết bị CÙNG LÚC song song]:::parallel
+        C7 --> C8[Tối ưu hóa thời gian chờ, các thiết bị\nkhôi phục trạng thái nhanh nhất có thể]:::parallel
+        C6 --> C9(Hệ thống hoàn tất Resume)
+        C8 --> C9
+        C9 --> C10(User-space app tiếp tục hoạt động\nKhông bị mất kết nối):::user
+    end
